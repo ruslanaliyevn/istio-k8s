@@ -1,40 +1,41 @@
+# Istio Service Mesh on Kubernetes
+
 <div align="center">
-  <img src="https://istio.io/latest/img/istio-bluelogo-whitebackground-unframed.svg" alt="Istio Logo" width="300"/>
-  <h1>Istio Service Mesh on Kubernetes</h1>
   
-  <p>
-    <img src="https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white" alt="Kubernetes"/>
-    <img src="https://img.shields.io/badge/Istio-466BB0?style=for-the-badge&logo=istio&logoColor=white" alt="Istio"/>
-    <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License"/>
-  </p>
-  
-  <p><strong>Production-ready Istio service mesh setup with MetalLB integration</strong></p>
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![Istio](https://img.shields.io/badge/Istio-466BB0?style=for-the-badge&logo=istio&logoColor=white)](https://istio.io/)
+[![MetalLB](https://img.shields.io/badge/MetalLB-0078D4?style=for-the-badge&logo=loadbalancer&logoColor=white)](https://metallb.universe.tf/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+
+**Production-ready Istio service mesh setup with MetalLB integration**
+
 </div>
 
 ---
 
 ## 📖 Overview
 
-Istio provides traffic management, security, and observability for microservices on Kubernetes. This guide covers installation and basic configuration with MetalLB LoadBalancer.
+Istio provides traffic management, security, and observability for microservices on Kubernetes. This guide covers complete installation with MetalLB LoadBalancer integration.
 
 ## 📋 Prerequisites
 
-- Kubernetes cluster (v1.19+)
+- Kubernetes cluster (v1.27+)
 - kubectl configured
-- MetalLB installed
+- Basic Kubernetes knowledge
 
 ## 🚀 Installation
 
-### 1. Download and Install Istio
+### 1. Install Istio
 
 ```bash
 # Download Istio
 curl -L https://istio.io/downloadIstio | sh -
-cd istio-*
-export PATH=$PWD/bin:$PATH
 
-# Install Istio
-istioctl install --set profile=default -y
+# Add istioctl to PATH
+export PATH="$PATH:$HOME/istio-1.28.1/bin"
+
+# Install Istio with demo profile
+istioctl install --set profile=demo -y
 
 # Enable sidecar injection
 kubectl label namespace default istio-injection=enabled
@@ -47,232 +48,434 @@ kubectl get pods -n istio-system
 kubectl get svc -n istio-system
 ```
 
-### 3. Get External IP
+Expected output:
+```
+NAME                                    READY   STATUS    RESTARTS   AGE
+istio-ingressgateway-xxxxxxxxxx-xxxxx   1/1     Running   0          2m
+istiod-xxxxxxxxxx-xxxxx                 1/1     Running   0          2m
+```
+
+## 🌐 MetalLB Configuration
+
+MetalLB provides LoadBalancer support for bare-metal clusters.
+
+### Install MetalLB
 
 ```bash
+kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/v0.13.12/config/manifests/metallb-native.yaml
+
+# Wait for pods to be ready
+kubectl wait --namespace metallb-system \
+  --for=condition=ready pod \
+  --selector=app=metallb \
+  --timeout=90s
+```
+
+### Configure IP Address Pool
+
+Create `metallb/address-pool.yaml`:
+
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: metallb-pool
+  namespace: metallb-system
+spec:
+  addresses:
+  - 203.0.113.10/32  # Replace with your actual public IP (e.g., 45.67.89.123/32)
+```
+
+### Configure L2 Advertisement
+
+Create `metallb/l2-advertisement.yaml`:
+
+```yaml
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: default-l2
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - metallb-pool
+```
+
+### Apply Configuration
+
+```bash
+kubectl apply -f metallb/address-pool.yaml
+kubectl apply -f metallb/l2-advertisement.yaml
+
+# Verify external IP is assigned
 kubectl get svc istio-ingressgateway -n istio-system
 ```
 
-Note the EXTERNAL-IP (e.g., `203.0.113.10`) from MetalLB.
+Expected output:
+```
+NAME                   TYPE           EXTERNAL-IP      PORT(S)
+istio-ingressgateway   LoadBalancer   203.0.113.10     80:xxxxx/TCP...
+```
 
-### 4. Configure DNS
+## 📦 Deploy Sample Application
 
-Point your domain to the External IP:
+### NGINX Example
 
+**1. Create Deployment**
+
+`examples/nginx/deployment.yaml`:
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25.3
+        ports:
+        - containerPort: 80
+```
+
+**2. Create Service**
+
+`examples/nginx/service.yaml`:
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-service
+  labels:
+    app: nginx
+spec:
+  type: ClusterIP
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+    protocol: TCP
+    name: http
+```
+
+**3. Create Gateway**
+
+`examples/nginx/gateway.yaml`:
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: Gateway
+metadata:
+  name: nginx-gateway
+  namespace: default
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "nginx.example.com"  # Replace with your domain
+```
+
+**4. Create VirtualService**
+
+`examples/nginx/virtualservice.yaml`:
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: nginx-vs
+  namespace: default
+spec:
+  hosts:
+  - "nginx.example.com"  # Must match Gateway host
+  gateways:
+  - nginx-gateway
+  http:
+  - match:
+    - uri:
+        prefix: "/"
+    route:
+    - destination:
+        host: nginx-service
+        port:
+          number: 80
+```
+
+### Deploy Everything
+
+```bash
+kubectl apply -f examples/nginx/deployment.yaml
+kubectl apply -f examples/nginx/service.yaml
+kubectl apply -f examples/nginx/gateway.yaml
+kubectl apply -f examples/nginx/virtualservice.yaml
+```
+
+### Verify Deployment
+
+```bash
+# Check pods (should show 2/2 with sidecar)
+kubectl get pods
+
+# Check all resources
+kubectl get gateway
+kubectl get virtualservice
+kubectl get svc
+```
+
+## 🌍 Access Your Application
+
+### Configure DNS
+
+First, point your domain to the external IP:
+
+**DNS Configuration:**
 ```
 Type: A
-Name: *.example.com
-Value: 203.0.113.10
+Name: nginx.example.com
+Value: 203.0.113.10  (your MetalLB external IP)
 TTL: 3600
 ```
 
-## 🌐 Gateway Setup
-
-### Deploy HTTP Gateway
-
-```bash
-kubectl apply -f gateway.yaml
+Or add to your local `/etc/hosts` for testing:
+```
+203.0.113.10  nginx.example.com
 ```
 
-This creates a gateway accepting traffic on:
-- Port 80 (HTTP)
-- Port 443 (HTTPS with TLS)
-
-Hosts: `*.example.com`
-
-## 📦 Deploy Applications
-
-### Option 1: Nginx Demo
+### Get External IP
 
 ```bash
-kubectl apply -f examples/nginx-demo.yaml
+export INGRESS_IP=$(kubectl -n istio-system get service istio-ingressgateway -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "Gateway IP: $INGRESS_IP"
 ```
 
-Access: `http://nginx.example.com`
-
-### Option 2: Bookinfo Sample
+### Test Access
 
 ```bash
-# Download Istio samples
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/bookinfo/platform/kube/bookinfo.yaml
+# Access via domain name
+curl http://nginx.example.com
 
-# Apply VirtualService
-kubectl apply -f examples/bookinfo-app.yaml
+# Or in browser
+http://nginx.example.com
 ```
 
-Access: `http://bookinfo.example.com/productpage`
+## 🔐 HTTPS/TLS Setup (Optional)
 
-## 🔐 HTTPS/TLS Setup
-
-### Create Self-Signed Certificate (for testing)
+### Create Self-Signed Certificate
 
 ```bash
 openssl req -x509 -newkey rsa:4096 -keyout tls.key -out tls.crt \
-  -days 365 -nodes -subj "/CN=*.example.com"
+  -days 365 -nodes -subj "/CN=nginx.example.com"
 ```
 
-### Create Kubernetes Secret
+### Create Secret
 
 ```bash
-kubectl create secret tls example-tls \
+kubectl create secret tls nginx-tls \
   --cert=tls.crt \
   --key=tls.key \
   -n istio-system
 ```
 
-### Update Gateway
+### Update Gateway for HTTPS
 
-The gateway.yaml already includes HTTPS configuration. Just update the `credentialName` if needed.
-
-## 🔧 Custom Application Example
-
+`examples/nginx/gateway-https.yaml`:
 ```yaml
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: myapp
-spec:
-  ports:
-  - port: 8080
-  selector:
-    app: myapp
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: myapp
-spec:
-  replicas: 2
-  selector:
-    matchLabels:
-      app: myapp
-  template:
-    metadata:
-      labels:
-        app: myapp
-    spec:
-      containers:
-      - name: myapp
-        image: nginx:latest
-        ports:
-        - containerPort: 80
----
 apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
+kind: Gateway
 metadata:
-  name: myapp
+  name: nginx-gateway
+  namespace: default
 spec:
-  hosts:
-  - "myapp.example.com"
-  gateways:
-  - istio-system/http-gateway
-  http:
-  - route:
-    - destination:
-        host: myapp
-        port:
-          number: 8080
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "nginx.example.com"
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: nginx-tls
+    hosts:
+    - "nginx.example.com"
 ```
 
-Save as `myapp.yaml` and apply:
-
+Apply the updated gateway:
 ```bash
-kubectl apply -f myapp.yaml
+kubectl apply -f examples/nginx/gateway-https.yaml
 ```
 
-## 🔍 Verification
+Access via HTTPS:
+```bash
+curl https://nginx.example.com
+```
+
+## 🛠️ Useful Commands
+
+### Check Istio Status
 
 ```bash
-# Check Istio version
-istioctl version
+# Check components
+kubectl get pods -n istio-system
 
 # Check gateway
-kubectl get gateway -n istio-system
+kubectl get gateway
 
-# Check VirtualServices
+# Check virtual services
 kubectl get virtualservice
-
-# Check proxy status
-istioctl proxy-status
 
 # Analyze configuration
 istioctl analyze
+
+# Check proxy status
+istioctl proxy-status
 ```
 
-## 📊 Observability (Optional)
+### Debug Issues
+
+```bash
+# Describe gateway
+kubectl describe gateway nginx-gateway
+
+# Check ingress gateway logs
+kubectl logs -n istio-system -l istio=ingressgateway
+
+# Check application logs
+kubectl logs <pod-name> -c nginx
+kubectl logs <pod-name> -c istio-proxy
+```
+
+## 📊 Observability with Kiali
 
 ### Install Kiali Dashboard
 
 ```bash
-kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.20/samples/addons/kiali.yaml
+# Install Kiali
+kubectl apply -f https://raw.githubusercontent.com/istio/istio/release-1.28/samples/addons/kiali.yaml
 
-# Access Kiali
-kubectl port-forward -n istio-system svc/kiali 20001:20001
+# Wait for Kiali to be ready
+kubectl wait --for=condition=available --timeout=300s deployment/kiali -n istio-system
+
+# Access Kiali dashboard
+istioctl dashboard kiali
 ```
 
-Open: `http://localhost:20001`
+Kiali will open at `http://localhost:20001` and show:
+- Service topology and dependencies
+- Traffic flow visualization
+- Health status of services
+- Configuration validation
 
 ## 🔍 Troubleshooting
 
-### Service Not Accessible
+### Pods Not Getting Sidecar
 
+**Check namespace label:**
 ```bash
-# Check VirtualService
-kubectl describe virtualservice <name>
-
-# Check Gateway
-kubectl describe gateway http-gateway -n istio-system
-
-# Check pods have sidecar (should show 2/2)
-kubectl get pods
+kubectl get namespace default -L istio-injection
 ```
 
-### External IP Pending
-
+**Fix:**
 ```bash
-# Check MetalLB
-kubectl get svc -n istio-system
-kubectl logs -n metallb deployment/metallb-controller
-```
-
-### Sidecar Not Injected
-
-```bash
-# Verify namespace label
-kubectl get namespace -L istio-injection
-
-# Re-label if needed
 kubectl label namespace default istio-injection=enabled --overwrite
-
-# Restart pods
-kubectl rollout restart deployment/<deployment-name>
+kubectl rollout restart deployment nginx-deployment
 ```
 
-For more details, see [Troubleshooting Guide](docs/troubleshooting.md).
+### Gateway Not Accessible
+
+**Check if external IP is assigned:**
+```bash
+kubectl get svc istio-ingressgateway -n istio-system
+```
+
+**If pending:**
+- Verify MetalLB is running
+- Check IP pool configuration
+- Ensure IP is not in use
+
+### 404 Not Found
+
+**Check service endpoints:**
+```bash
+kubectl get endpoints nginx-service
+```
+
+**Verify VirtualService:**
+```bash
+kubectl get virtualservice nginx-vs -o yaml
+```
+
+**Test internal connectivity:**
+```bash
+kubectl run -it --rm debug --image=curlimages/curl --restart=Never -- curl http://nginx-service
+```
 
 ## 🧹 Cleanup
 
 ```bash
-# Remove applications
-kubectl delete -f examples/
+# Remove application
+kubectl delete -f examples/nginx/
 
 # Uninstall Istio
 istioctl uninstall --purge -y
 kubectl delete namespace istio-system
 
+# Remove MetalLB
+kubectl delete -f metallb/
+
 # Remove namespace label
 kubectl label namespace default istio-injection-
+```
+
+## 📁 Repository Structure
+
+```
+istio-k8s/
+├── README.md
+├── metallb/
+│   ├── address-pool.yaml
+│   └── l2-advertisement.yaml
+└── examples/
+    └── nginx/
+        ├── deployment.yaml
+        ├── service.yaml
+        ├── gateway.yaml
+        └── virtualservice.yaml
 ```
 
 ## 📚 Resources
 
 - [Istio Documentation](https://istio.io/latest/docs/)
+- [MetalLB Documentation](https://metallb.universe.tf/)
 - [Traffic Management](https://istio.io/latest/docs/concepts/traffic-management/)
-- [Security](https://istio.io/latest/docs/concepts/security/)
+- [Kiali Documentation](https://kiali.io/docs/)
 
 ---
 
 <div align="center">
-  <p>Made with ❤️ for Kubernetes</p>
+  
+**⭐ Star this repo if you find it helpful!**
+
+
+
 </div>
