@@ -22,7 +22,6 @@ Istio provides traffic management, security, and observability for microservices
 - Kubernetes cluster (v1.19+)
 - kubectl configured
 - MetalLB installed
-- Minimum 4GB RAM per node
 
 ## 🚀 Installation
 
